@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#061018">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="DUST">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<title>DUST Journal</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#061018}
+#journal{position:fixed;inset:0;width:100%;height:100%;border:0;background:#061018}
+#boot{position:fixed;inset:0;z-index:10;display:grid;place-items:center;background:#061018;color:#eaf4f7;
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center;padding:24px}
+#boot b{display:block;letter-spacing:.14em;font-size:18px}
+#boot span{display:block;margin-top:10px;color:#7f9baa;font-size:12px;line-height:1.55}
+</style>
+</head>
+<body>
+<div id="boot"><div><b>DUST</b><span>Starting Journal…</span></div></div>
+<iframe id="journal" src="./index.html?home_shell=038" title="DUST Journal"></iframe>
+
+<script>
+(() => {
+  const frame = document.getElementById('journal');
+  const boot = document.getElementById('boot');
+
+  // This Home-Screen shell must never depend on the legacy service worker.
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations()
+      .then(regs => Promise.all(regs.map(r => r.unregister())))
+      .catch(() => {});
+  }
+
+  function installForwardSync() {
+    try {
+      const doc = frame.contentDocument;
+      const win = frame.contentWindow;
+      if (!doc || !win) throw new Error('Journal frame unavailable');
+
+      // Ensure only one copy is injected.
+      if (!doc.querySelector('script[data-dust-forward-sync]')) {
+        const s = doc.createElement('script');
+        s.src = './forward-sync.js?v=038';
+        s.dataset.dustForwardSync = '1';
+        s.async = false;
+        doc.body.appendChild(s);
+      }
+
+      // Keep the outer app visually identical to the journal.
+      document.title = doc.title || 'DUST Journal';
+      boot.style.display = 'none';
+
+      // Retry once after the journal has fully rendered, in case Accounts
+      // mounted after the external sync script first evaluated.
+      setTimeout(() => {
+        try {
+          if (!doc.getElementById('dustForwardSyncCard')) {
+            const retry = doc.createElement('script');
+            retry.src = './forward-sync.js?v=038_retry';
+            retry.dataset.dustForwardSync = '1';
+            retry.async = false;
+            doc.body.appendChild(retry);
+          }
+        } catch {}
+      }, 1200);
+
+    } catch (err) {
+      boot.innerHTML =
+        '<div><b>DUST</b><span>Journal started, but Forward Sync could not attach.<br>' +
+        'Close the app and open it once more.</span></div>';
+      console.error('DUST Home shell:', err);
+    }
+  }
+
+  frame.addEventListener('load', installForwardSync);
+
+  // Safety retry for WebKit timing differences.
+  setTimeout(() => {
+    if (boot.style.display !== 'none') installForwardSync();
+  }, 2500);
+})();
+</script>
+</body>
+</html>
