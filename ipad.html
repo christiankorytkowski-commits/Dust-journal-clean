@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#061018">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="DUST Journal">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<title>DUST Journal</title>
+<style>
+html,body{margin:0;width:100%;height:100%;background:#061018;color:#eaf4f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+#boot{height:100%;display:grid;place-items:center;text-align:center;padding:24px;box-sizing:border-box}
+#boot b{display:block;letter-spacing:.14em;font-size:18px}
+#boot span{display:block;margin-top:10px;color:#7f9baa;font-size:12px;line-height:1.5}
+</style>
+</head>
+<body>
+<div id="boot"><div><b>DUST</b><span>Loading current Journal…</span></div></div>
+<script>
+(async () => {
+  try {
+    // This launcher deliberately does not use the manifest start_url.
+    // It always requests the current Journal shell from the network.
+    const response = await fetch('./index.html?ipad_shell=036', { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    let html = await response.text();
+
+    // Forward Sync must be part of the page itself, not injected by a Service Worker.
+    if (!html.includes('forward-sync.js')) {
+      html = html.replace(
+        '</body>',
+        '<script src="./forward-sync.js?v=036"><' + '/script>\n</body>'
+      );
+    }
+
+    document.open();
+    document.write(html);
+    document.close();
+  } catch (err) {
+    document.getElementById('boot').innerHTML =
+      '<div><b>DUST</b><span>Could not load the current Journal.<br>Check your internet connection and reopen the app.</span></div>';
+    console.error(err);
+  }
+})();
+</script>
+</body>
+</html>
