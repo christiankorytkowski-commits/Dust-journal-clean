@@ -15,9 +15,14 @@
 
   function readConfig() {
     try {
-      return { enabled: true, url: '', ...JSON.parse(localStorage.getItem(SYNC_KEY) || '{}') };
+      return {
+        enabled: true,
+        url: '',
+        shadowConfigured: false,
+        ...JSON.parse(localStorage.getItem(SYNC_KEY) || '{}')
+      };
     } catch {
-      return { enabled: true, url: '' };
+      return { enabled: true, url: '', shadowConfigured: false };
     }
   }
 
@@ -40,22 +45,10 @@
     return { currentAccountId: SHADOW_ID, accounts: [], trades: [] };
   }
 
-  function persistJournal(targetDb) {
-    try {
-      if (typeof db !== 'undefined' && targetDb === db && typeof save === 'function') {
-        save();
-      } else {
-        localStorage.setItem(JOURNAL_KEY, JSON.stringify(targetDb));
-      }
-      if (typeof render === 'function') render();
-    } catch (err) {
-      throw new Error(`Journal save failed: ${err.message}`);
-    }
-  }
-
   function ensureShadowAccount(targetDb, account) {
-    targetDb.accounts = targetDb.accounts || [];
-    targetDb.trades = targetDb.trades || [];
+    targetDb.accounts = Array.isArray(targetDb.accounts) ? targetDb.accounts : [];
+    targetDb.trades = Array.isArray(targetDb.trades) ? targetDb.trades : [];
+
     let a = targetDb.accounts.find((x) => x.id === SHADOW_ID);
     if (!a) {
       a = {
@@ -69,6 +62,7 @@
       };
       targetDb.accounts.push(a);
     }
+
     if (account) {
       if (Number.isFinite(Number(account.startingBalance))) a.startingBalance = Number(account.startingBalance);
       if (Number.isFinite(Number(account.maxDrawdownPct))) a.maxDrawdownPct = Number(account.maxDrawdownPct);
@@ -82,8 +76,45 @@
     return a;
   }
 
+  function persistJournal(targetDb) {
+    try {
+      // Critical iPad/PWA persistence rule:
+      // always write the complete DB directly to localStorage first.
+      localStorage.setItem(JOURNAL_KEY, JSON.stringify(targetDb));
+
+      // Keep the main journal's in-memory object/UI aligned when available.
+      try {
+        if (typeof db !== 'undefined' && targetDb !== db) {
+          db.accounts = targetDb.accounts;
+          db.trades = targetDb.trades;
+          if (targetDb.currentAccountId) db.currentAccountId = targetDb.currentAccountId;
+        }
+      } catch {}
+
+      // save() is still useful for the journal's own bookkeeping, but is no
+      // longer the only persistence path.
+      try {
+        if (typeof save === 'function') save();
+      } catch {}
+
+      if (typeof render === 'function') render();
+    } catch (err) {
+      throw new Error(`Journal save failed: ${err.message}`);
+    }
+  }
+
+  function restoreShadowAccountFromConfig() {
+    const cfg = readConfig();
+    if (!cfg.shadowConfigured && !normalizedUrl(cfg.url)) return;
+
+    const targetDb = getJournalDb();
+    ensureShadowAccount(targetDb, null);
+    persistJournal(targetDb);
+  }
+
   function importClosedTrades(targetDb, snapshot) {
     ensureShadowAccount(targetDb, snapshot.account);
+
     const existing = new Set(
       (targetDb.trades || [])
         .filter((t) => t.accountId === SHADOW_ID)
@@ -95,6 +126,7 @@
       const id = String(src.id || `${src.entryTime || ''}:${src.exitTime || ''}:${src.entryPrice || ''}`);
       const journalId = id.startsWith('shadow:') ? id : `shadow:${id}`;
       if (existing.has(journalId) || existing.has(id)) continue;
+
       targetDb.trades.push({
         ...src,
         id: journalId,
@@ -108,6 +140,7 @@
         screenshots: Array.isArray(src.screenshots) ? src.screenshots : [],
         source: 'DUST Forward Sync'
       });
+
       existing.add(journalId);
       added += 1;
     }
@@ -133,7 +166,9 @@
           <span class="pill ${statusClass}" id="dustSyncPill">${escSync(status)}</span>
         </div>
         <div class="field full">Private engine HTTPS URL
-          <input id="dustSyncUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://your-pc.your-tailnet.ts.net" value="${escSync(cfg.url || '')}">
+          <input id="dustSyncUrl" type="url" inputmode="url" autocomplete="off"
+                 placeholder="https://your-pc.your-tailnet.ts.net"
+                 value="${escSync(cfg.url || '')}">
         </div>
         <label class="checkbox"><input id="dustSyncEnabled" type="checkbox" ${cfg.enabled !== false ? 'checked' : ''}> Auto-sync when DUST Journal is open</label>
         <div class="btnrow">
@@ -175,9 +210,18 @@
       t = document.createElement('div');
       t.id = 'dustSyncToast';
       Object.assign(t.style, {
-        position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: '92px', zIndex: '150',
-        background: '#102836', color: '#eaf4f7', border: '1px solid #24485d', borderRadius: '12px',
-        padding: '10px 14px', fontSize: '12px', boxShadow: '0 12px 30px rgba(0,0,0,.35)'
+        position: 'fixed',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        bottom: '92px',
+        zIndex: '150',
+        background: '#102836',
+        color: '#eaf4f7',
+        border: '1px solid #24485d',
+        borderRadius: '12px',
+        padding: '10px 14px',
+        fontSize: '12px',
+        boxShadow: '0 12px 30px rgba(0,0,0,.35)'
       });
       document.body.appendChild(t);
     }
@@ -189,12 +233,15 @@
 
   async function syncNow({ silent = false } = {}) {
     if (syncing) return;
+
     const cfg = readConfig();
     const base = normalizedUrl(cfg.url);
+
     if (!base) {
       if (!silent) setMeta('Enter the private Tailscale HTTPS URL first.', 'SETUP');
       return;
     }
+
     if (location.protocol === 'https:' && !base.startsWith('https://')) {
       setMeta('Remote sync requires an HTTPS URL. Use Tailscale Serve, not a raw http:// address.', 'ERROR');
       return;
@@ -202,8 +249,10 @@
 
     syncing = true;
     setMeta('Connecting to your private forward engine…', 'SYNCING');
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8_000);
+
     try {
       const response = await fetch(`${base}/snapshot`, {
         method: 'GET',
@@ -212,22 +261,48 @@
         credentials: 'omit',
         signal: controller.signal
       });
+
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
       const snapshot = await response.json();
-      if (!snapshot || !snapshot.engine || !snapshot.account) throw new Error('Invalid engine snapshot');
+      if (!snapshot || !snapshot.engine || !snapshot.account) {
+        throw new Error('Invalid engine snapshot');
+      }
+
       lastSnapshot = snapshot;
+
       const targetDb = getJournalDb();
       const added = importClosedTrades(targetDb, snapshot);
       persistJournal(targetDb);
+
+      // Remember that this device should always retain the Shadow account.
+      writeConfig({
+        ...cfg,
+        enabled: cfg.enabled !== false,
+        url: base,
+        shadowConfigured: true
+      });
+
       mountCard();
+
       const price = snapshot.engine.marketPrice ? Number(snapshot.engine.marketPrice).toLocaleString() : '—';
       const pos = snapshot.position ? `${String(snapshot.position.direction || '').toUpperCase()} open` : 'No open position';
       const armed = Array.isArray(snapshot.armedOrders) ? snapshot.armedOrders.length : 0;
-      setMeta(`${price} BTC · ${pos} · ${armed} armed · ${added ? `${added} new trade${added === 1 ? '' : 's'} imported` : 'journal up to date'}`, 'SYNCED');
-      if (added && !silent) toast(`${added} new DUST Forward trade${added === 1 ? '' : 's'} added to Journal`);
+
+      setMeta(
+        `${price} BTC · ${pos} · ${armed} armed · ${added ? `${added} new trade${added === 1 ? '' : 's'} imported` : 'journal up to date'}`,
+        'SYNCED'
+      );
+
+      if (added && !silent) {
+        toast(`${added} new DUST Forward trade${added === 1 ? '' : 's'} added to Journal`);
+      }
     } catch (err) {
       const message = err.name === 'AbortError' ? 'Connection timed out' : err.message;
-      setMeta(`Could not reach private engine: ${message}. Check Tailscale on both devices and keep the laptop awake.`, 'ERROR');
+      setMeta(
+        `Could not reach private engine: ${message}. Check Tailscale on both devices and keep the laptop awake.`,
+        'ERROR'
+      );
     } finally {
       clearTimeout(timeout);
       syncing = false;
@@ -247,27 +322,51 @@
     const syncBtn = document.getElementById('dustSyncNow');
     const urlInput = document.getElementById('dustSyncUrl');
     const enabledInput = document.getElementById('dustSyncEnabled');
-    if (saveBtn) saveBtn.onclick = () => {
-      const next = { enabled: !!enabledInput?.checked, url: normalizedUrl(urlInput?.value) };
-      writeConfig(next);
-      schedule();
-      setMeta(next.url ? 'Connection saved. Tap Sync now to test it.' : 'Connection cleared.', next.url ? 'READY' : 'SETUP');
-    };
-    if (syncBtn) syncBtn.onclick = () => {
-      const next = { enabled: !!enabledInput?.checked, url: normalizedUrl(urlInput?.value) };
-      writeConfig(next);
-      schedule();
-      syncNow({ silent: false });
-    };
+
+    if (saveBtn) {
+      saveBtn.onclick = () => {
+        const next = {
+          ...readConfig(),
+          enabled: !!enabledInput?.checked,
+          url: normalizedUrl(urlInput?.value)
+        };
+        writeConfig(next);
+        if (next.url) restoreShadowAccountFromConfig();
+        schedule();
+        setMeta(next.url ? 'Connection saved. Tap Sync now to test it.' : 'Connection cleared.', next.url ? 'READY' : 'SETUP');
+      };
+    }
+
+    if (syncBtn) {
+      syncBtn.onclick = () => {
+        const next = {
+          ...readConfig(),
+          enabled: !!enabledInput?.checked,
+          url: normalizedUrl(urlInput?.value)
+        };
+        writeConfig(next);
+        if (next.url) restoreShadowAccountFromConfig();
+        schedule();
+        syncNow({ silent: false });
+      };
+    }
   }
 
   function boot() {
+    // Restore the Shadow account before the first UI render/sync attempt.
+    restoreShadowAccountFromConfig();
     mountCard();
     schedule();
+
     const cfg = readConfig();
-    if (cfg.enabled !== false && normalizedUrl(cfg.url)) syncNow({ silent: true });
+    if (cfg.enabled !== false && normalizedUrl(cfg.url)) {
+      syncNow({ silent: true });
+    }
   }
 
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
-  else boot();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot, { once: true });
+  } else {
+    boot();
+  }
 })();
