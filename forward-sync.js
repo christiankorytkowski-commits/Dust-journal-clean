@@ -1,6 +1,14 @@
 (() => {
   'use strict';
 
+  // dust-home.html injects this file and re-injects it as a "retry". Without a guard
+  // every copy started its own 60 s timer and bound its own handlers.
+  if (window.__dustForwardSyncLoaded) {
+    try { window.__dustForwardSyncMount && window.__dustForwardSyncMount(); } catch {}
+    return;
+  }
+  window.__dustForwardSyncLoaded = true;
+
   const JOURNAL_KEY = 'dust.mobile.v1';
   const SYNC_KEY = 'dust.forwardSync.v1';
   const SHADOW_ID = 'dust_shadow_50k';
@@ -18,11 +26,12 @@
       return {
         enabled: true,
         url: '',
+        token: '',
         shadowConfigured: false,
         ...JSON.parse(localStorage.getItem(SYNC_KEY) || '{}')
       };
     } catch {
-      return { enabled: true, url: '', shadowConfigured: false };
+      return { enabled: true, url: '', token: '', shadowConfigured: false };
     }
   }
 
@@ -170,6 +179,11 @@
                  placeholder="https://your-pc.your-tailnet.ts.net"
                  value="${escSync(cfg.url || '')}">
         </div>
+        <div class="field full">API token (DUST_API_TOKEN of the engine)
+          <input id="dustSyncToken" type="password" autocomplete="off"
+                 placeholder="stored only on this device"
+                 value="${escSync(cfg.token || '')}">
+        </div>
         <label class="checkbox"><input id="dustSyncEnabled" type="checkbox" ${cfg.enabled !== false ? 'checked' : ''}> Auto-sync when DUST Journal is open</label>
         <div class="btnrow">
           <button class="btn primary" id="dustSyncNow">Sync now</button>
@@ -259,9 +273,13 @@
         mode: 'cors',
         cache: 'no-store',
         credentials: 'omit',
+        // The engine's /snapshot requires a bearer token (require_api_token=true by
+        // default). Without this header every sync failed with HTTP 401.
+        headers: cfg.token ? { Authorization: `Bearer ${cfg.token}` } : {},
         signal: controller.signal
       });
 
+      if (response.status === 401) throw new Error('HTTP 401 – API token missing or wrong');
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const snapshot = await response.json();
@@ -322,13 +340,15 @@
     const syncBtn = document.getElementById('dustSyncNow');
     const urlInput = document.getElementById('dustSyncUrl');
     const enabledInput = document.getElementById('dustSyncEnabled');
+    const tokenInput = document.getElementById('dustSyncToken');
 
     if (saveBtn) {
       saveBtn.onclick = () => {
         const next = {
           ...readConfig(),
           enabled: !!enabledInput?.checked,
-          url: normalizedUrl(urlInput?.value)
+          url: normalizedUrl(urlInput?.value),
+          token: String(tokenInput?.value || '').trim()
         };
         writeConfig(next);
         if (next.url) restoreShadowAccountFromConfig();
@@ -342,7 +362,8 @@
         const next = {
           ...readConfig(),
           enabled: !!enabledInput?.checked,
-          url: normalizedUrl(urlInput?.value)
+          url: normalizedUrl(urlInput?.value),
+          token: String(tokenInput?.value || '').trim()
         };
         writeConfig(next);
         if (next.url) restoreShadowAccountFromConfig();
@@ -351,6 +372,8 @@
       };
     }
   }
+
+  window.__dustForwardSyncMount = mountCard;
 
   function boot() {
     // Restore the Shadow account before the first UI render/sync attempt.
